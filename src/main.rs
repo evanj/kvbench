@@ -49,7 +49,7 @@ impl KVError {
 
 trait KVStore {
     fn put(&mut self, key: &[u8], value: &[u8]) -> Result<(), KVError>;
-    // fn get(&mut self, key: &[u8]) -> Result<&[u8], KVError>;
+    fn get(&mut self, key: &[u8]) -> Result<&[u8], KVError>;
 }
 
 struct HashMapStore {
@@ -71,6 +71,10 @@ impl KVStore for HashMapStore {
         let value_vec = Vec::from(value);
         self.store.insert(key_vec, value_vec);
         Ok(())
+    }
+
+    fn get(&mut self, key: &[u8]) -> Result<Option<&[u8]>, KVError> {
+        selt.store.get
     }
 }
 
@@ -171,8 +175,14 @@ fn main() -> Result<(), KVError> {
 
 #[cfg(test)]
 mod test {
+    use super::*;
+
     #[test]
-    fn test_stuff() {
-        assert_eq!(1, 1);
+    fn test_hash_store() {
+        let mut store = HashMapStore::new();
+        store.put(b"abc", b"xyz").unwrap();
+
+        let borrowed_get = store.get(b"abc").unwrap();
+        assert_eq!(borrowed_get, b"xyz");
     }
 }
