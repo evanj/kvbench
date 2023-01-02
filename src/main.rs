@@ -13,7 +13,7 @@ struct BenchmarkConfig {
     /// measurement duration.
     #[argh(
         option,
-        default = "Duration::from_secs(2)",
+        default = "Duration::from_secs(10)",
         from_str_fn(argh_parse_go_duration)
     )]
     measure_duration: Duration,
@@ -34,17 +34,16 @@ fn argh_parse_go_duration(s: &str) -> Result<Duration, String> {
 }
 
 #[derive(Debug)]
-struct KVError {
-    message: String,
+enum KVError {
+    KeyNotFound,
+    // Message(String),
 }
 
 impl KVError {
-    fn msg<T>(m: &str) -> Result<T, Self> {
-        let err = Self {
-            message: String::from(m),
-        };
-        Err(err)
-    }
+    // fn msg<T>(m: &str) -> Result<T, Self> {
+    //     let err = Self::Message(String::from(m));
+    //     Err(err)
+    // }
 }
 
 trait KVStore {
@@ -66,21 +65,31 @@ impl HashMapStore {
 
 impl KVStore for HashMapStore {
     fn put(&mut self, key: &[u8], value: &[u8]) -> Result<(), KVError> {
-        // TODO: avoid allocating the key on overwrite?
-        let key_vec = Vec::from(key);
-        let value_vec = Vec::from(value);
-        self.store.insert(key_vec, value_vec);
+        // using get_mut was about 10% faster than just insert on a full overwrite workload
+        if let Some(value_mut) = self.store.get_mut(key) {
+            // about 10% better than *value_mut = Vec::from(value)
+            value_mut.truncate(0);
+            value_mut.extend_from_slice(value);
+        } else {
+            let key_vec = Vec::from(key);
+            let value_vec = Vec::from(value);
+            self.store.insert(key_vec, value_vec);
+        }
         Ok(())
     }
 
-    fn get(&mut self, key: &[u8]) -> Result<Option<&[u8]>, KVError> {
-        selt.store.get
+    fn get(&mut self, key: &[u8]) -> Result<&[u8], KVError> {
+        if let Some(value) = self.store.get(key) {
+            Ok(value)
+        } else {
+            Err(KVError::KeyNotFound)
+        }
     }
 }
 
 struct KeyGenerator {
     rng: rand_xoshiro::Xoshiro256Plus,
-    num_keys: usize,
+    // num_keys: usize,
     key_buffer: [u8; 8],
     key_range: rand::distributions::Uniform<u64>,
 }
@@ -92,7 +101,7 @@ impl KeyGenerator {
         let rng = rand_xoshiro::Xoshiro256Plus::from_entropy();
         Self {
             rng,
-            num_keys,
+            // num_keys,
             key_buffer: [0u8; 8],
             key_range: rand::distributions::Uniform::from(0..num_keys as u64),
         }
@@ -119,9 +128,11 @@ fn fill_store(store: &mut dyn KVStore, num_keys: usize) -> Result<(), KVError> {
     }
     let end = Instant::now();
     let duration = end - start;
+    let data_bytes = 16 * num_keys;
     println!(
-        "filled in {duration:?} ; {:.1} keys/sec",
-        num_keys as f64 / duration.as_secs_f64()
+        "filled in {duration:?} ; {:.1} keys/sec; {:.1} MiB of data",
+        num_keys as f64 / duration.as_secs_f64(),
+        data_bytes as f64 / 1024.0 / 1024.0,
     );
 
     Ok(())
@@ -136,6 +147,7 @@ fn run_bench(
     let start = Instant::now();
     let measure_end = start + measure_duration;
 
+    let mut value_bytes_array: [u8; 8];
     loop {
         let now = Instant::now();
         if now >= measure_end {
@@ -143,14 +155,15 @@ fn run_bench(
         }
 
         requests += 1;
+        value_bytes_array = requests.to_le_bytes();
         let key_slice = key_gen.next_key();
-        store.put(key_slice, key_slice)?;
+        store.put(key_slice, &value_bytes_array[..])?;
     }
 
     let end = Instant::now();
     let duration = end - start;
     println!(
-        "{} requests in {duration:?}; {} requests/sec",
+        "{} requests in {duration:?}; {:.3} requests/sec",
         requests,
         requests as f64 / duration.as_secs_f64()
     );
@@ -182,7 +195,11 @@ mod test {
         let mut store = HashMapStore::new();
         store.put(b"abc", b"xyz").unwrap();
 
-        let borrowed_get = store.get(b"abc").unwrap();
-        assert_eq!(borrowed_get, b"xyz");
+        let borrowed_get_value = store.get(b"abc").unwrap();
+        assert_eq!(borrowed_get_value, b"xyz");
+
+        store.put(b"abc", b"123").unwrap();
+        //assert_eq!(borrowed_get_value, b"xyz");
+        assert_eq!(b"123", store.get(b"abc").unwrap());
     }
 }

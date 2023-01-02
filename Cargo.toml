@@ -3,7 +3,12 @@ name = "kvbench"
 version = "0.1.0"
 edition = "2021"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[profile.release-nativecpu]
+inherits = "release"
+debug = true
+# still unstable: https://doc.rust-lang.org/nightly/cargo/reference/unstable.html#profile-rustflags-option
+# this is defined for make run_native
+#rustflags = ["-C", "target-cpu=native"]
 
 [dependencies]
 argh = "0.1.9"
