@@ -1,6 +1,6 @@
 use rand::prelude::Distribution;
 use rand::SeedableRng;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::time::{Duration, Instant};
 
 #[derive(argh::FromArgs)]
@@ -17,6 +17,10 @@ struct BenchmarkConfig {
         from_str_fn(argh_parse_go_duration)
     )]
     measure_duration: Duration,
+
+    /// kind of store.
+    #[argh(option, default = "StoreKind::HashMap")]
+    store_kind: StoreKind,
 }
 
 // Parses a duration using Go's formats, with the signature required by argh.
@@ -31,6 +35,16 @@ fn argh_parse_go_duration(s: &str) -> Result<Duration, String> {
             ))
         }
     }
+}
+
+#[derive(strum::EnumString)]
+enum StoreKind {
+    HashMap,
+    BTreeMap,
+}
+
+impl StoreKind {
+    fn create() -> impl KVStore {}
 }
 
 #[derive(Debug)]
@@ -64,6 +78,42 @@ impl HashMapStore {
 }
 
 impl KVStore for HashMapStore {
+    fn put(&mut self, key: &[u8], value: &[u8]) -> Result<(), KVError> {
+        // using get_mut was about 10% faster than just insert on a full overwrite workload
+        if let Some(value_mut) = self.store.get_mut(key) {
+            // about 10% better than *value_mut = Vec::from(value)
+            value_mut.truncate(0);
+            value_mut.extend_from_slice(value);
+        } else {
+            let key_vec = Vec::from(key);
+            let value_vec = Vec::from(value);
+            self.store.insert(key_vec, value_vec);
+        }
+        Ok(())
+    }
+
+    fn get(&mut self, key: &[u8]) -> Result<&[u8], KVError> {
+        if let Some(value) = self.store.get(key) {
+            Ok(value)
+        } else {
+            Err(KVError::KeyNotFound)
+        }
+    }
+}
+
+struct BTreeMapStore {
+    store: BTreeMap<Vec<u8>, Vec<u8>>,
+}
+
+impl BTreeMapStore {
+    fn new() -> Self {
+        Self {
+            store: BTreeMap::new(),
+        }
+    }
+}
+
+impl KVStore for BTreeMapStore {
     fn put(&mut self, key: &[u8], value: &[u8]) -> Result<(), KVError> {
         // using get_mut was about 10% faster than just insert on a full overwrite workload
         if let Some(value_mut) = self.store.get_mut(key) {
@@ -192,6 +242,19 @@ mod test {
 
     #[test]
     fn test_hash_store() {
+        let mut store = HashMapStore::new();
+        store.put(b"abc", b"xyz").unwrap();
+
+        let borrowed_get_value = store.get(b"abc").unwrap();
+        assert_eq!(borrowed_get_value, b"xyz");
+
+        store.put(b"abc", b"123").unwrap();
+        //assert_eq!(borrowed_get_value, b"xyz");
+        assert_eq!(b"123", store.get(b"abc").unwrap());
+    }
+
+    #[test]
+    fn test_btree_store() {
         let mut store = HashMapStore::new();
         store.put(b"abc", b"xyz").unwrap();
 
