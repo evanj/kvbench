@@ -18,12 +18,12 @@ struct BenchmarkConfig {
     )]
     measure_duration: Duration,
 
-    /// kind of store.
+    /// kind of store (BTreeMap, HashMap)
     #[argh(option, default = "StoreKind::HashMap")]
     store_kind: StoreKind,
 }
 
-// Parses a duration using Go's formats, with the signature required by argh.
+/// Parses a duration using Go's formats, with the signature required by argh.
 fn argh_parse_go_duration(s: &str) -> Result<Duration, String> {
     let result = go_parse_duration::parse_duration(s);
     match result {
@@ -44,7 +44,12 @@ enum StoreKind {
 }
 
 impl StoreKind {
-    fn create() -> impl KVStore {}
+    fn create(&self) -> Box<dyn KVStore> {
+        match self {
+            Self::HashMap => Box::new(HashMapStore::new()),
+            Self::BTreeMap => Box::new(BTreeMapStore::new()),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -106,7 +111,7 @@ struct BTreeMapStore {
 }
 
 impl BTreeMapStore {
-    fn new() -> Self {
+    const fn new() -> Self {
         Self {
             store: BTreeMap::new(),
         }
@@ -228,11 +233,11 @@ fn main() -> Result<(), KVError> {
         config.num_keys, config.measure_duration
     );
 
-    let mut store = HashMapStore::new();
-    fill_store(&mut store, config.num_keys)?;
+    let mut store = config.store_kind.create();
+    fill_store(store.as_mut(), config.num_keys)?;
 
     let mut key_gen = KeyGenerator::new(config.num_keys);
-    run_bench(&mut store, &mut key_gen, config.measure_duration)?;
+    run_bench(store.as_mut(), &mut key_gen, config.measure_duration)?;
     Ok(())
 }
 
