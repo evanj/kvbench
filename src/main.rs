@@ -1,10 +1,11 @@
 use rand::prelude::Distribution;
 use rand::SeedableRng;
-use std::collections::{BTreeMap, HashMap};
 use std::time::{Duration, Instant};
 
-#[derive(argh::FromArgs)]
+use kvbench::*;
+
 /// Configuration for the key/value benchmark.
+#[derive(argh::FromArgs)]
 struct BenchmarkConfig {
     /// number of keys.
     #[argh(option, default = "10")]
@@ -21,6 +22,27 @@ struct BenchmarkConfig {
     /// kind of store (BTreeMap, HashMap)
     #[argh(option, default = "StoreKind::HashMap")]
     store_kind: StoreKind,
+
+    /// URL to connect to redis e.g. redis:///localhost:12345
+    #[argh(option, default = "String::new()")]
+    redis_url: String,
+}
+
+#[derive(strum::EnumString)]
+enum StoreKind {
+    HashMap,
+    BTreeMap,
+    Redis,
+}
+
+impl StoreKind {
+    fn create(&self, config: &BenchmarkConfig) -> Result<Box<dyn KVStore>, KVError> {
+        match self {
+            Self::HashMap => Ok(Box::new(HashMapStore::new())),
+            Self::BTreeMap => Ok(Box::new(BTreeMapStore::new())),
+            Self::Redis => Ok(Box::new(RedisStore::new(&config.redis_url)?)),
+        }
+    }
 }
 
 /// Parses a duration using Go's formats, with the signature required by argh.
@@ -33,111 +55,6 @@ fn argh_parse_go_duration(s: &str) -> Result<Duration, String> {
             Ok(Duration::from_nanos(
                 nanos.try_into().expect("BUG: duration must be >= 0"),
             ))
-        }
-    }
-}
-
-#[derive(strum::EnumString)]
-enum StoreKind {
-    HashMap,
-    BTreeMap,
-}
-
-impl StoreKind {
-    fn create(&self) -> Box<dyn KVStore> {
-        match self {
-            Self::HashMap => Box::new(HashMapStore::new()),
-            Self::BTreeMap => Box::new(BTreeMapStore::new()),
-        }
-    }
-}
-
-#[derive(Debug)]
-enum KVError {
-    KeyNotFound,
-    // Message(String),
-}
-
-impl KVError {
-    // fn msg<T>(m: &str) -> Result<T, Self> {
-    //     let err = Self::Message(String::from(m));
-    //     Err(err)
-    // }
-}
-
-trait KVStore {
-    fn put(&mut self, key: &[u8], value: &[u8]) -> Result<(), KVError>;
-    fn get(&mut self, key: &[u8]) -> Result<&[u8], KVError>;
-}
-
-struct HashMapStore {
-    store: HashMap<Vec<u8>, Vec<u8>>,
-}
-
-impl HashMapStore {
-    fn new() -> Self {
-        Self {
-            store: HashMap::new(),
-        }
-    }
-}
-
-impl KVStore for HashMapStore {
-    fn put(&mut self, key: &[u8], value: &[u8]) -> Result<(), KVError> {
-        // using get_mut was about 10% faster than just insert on a full overwrite workload
-        if let Some(value_mut) = self.store.get_mut(key) {
-            // about 10% better than *value_mut = Vec::from(value)
-            value_mut.truncate(0);
-            value_mut.extend_from_slice(value);
-        } else {
-            let key_vec = Vec::from(key);
-            let value_vec = Vec::from(value);
-            self.store.insert(key_vec, value_vec);
-        }
-        Ok(())
-    }
-
-    fn get(&mut self, key: &[u8]) -> Result<&[u8], KVError> {
-        if let Some(value) = self.store.get(key) {
-            Ok(value)
-        } else {
-            Err(KVError::KeyNotFound)
-        }
-    }
-}
-
-struct BTreeMapStore {
-    store: BTreeMap<Vec<u8>, Vec<u8>>,
-}
-
-impl BTreeMapStore {
-    const fn new() -> Self {
-        Self {
-            store: BTreeMap::new(),
-        }
-    }
-}
-
-impl KVStore for BTreeMapStore {
-    fn put(&mut self, key: &[u8], value: &[u8]) -> Result<(), KVError> {
-        // using get_mut was about 10% faster than just insert on a full overwrite workload
-        if let Some(value_mut) = self.store.get_mut(key) {
-            // about 10% better than *value_mut = Vec::from(value)
-            value_mut.truncate(0);
-            value_mut.extend_from_slice(value);
-        } else {
-            let key_vec = Vec::from(key);
-            let value_vec = Vec::from(value);
-            self.store.insert(key_vec, value_vec);
-        }
-        Ok(())
-    }
-
-    fn get(&mut self, key: &[u8]) -> Result<&[u8], KVError> {
-        if let Some(value) = self.store.get(key) {
-            Ok(value)
-        } else {
-            Err(KVError::KeyNotFound)
         }
     }
 }
@@ -233,7 +150,7 @@ fn main() -> Result<(), KVError> {
         config.num_keys, config.measure_duration
     );
 
-    let mut store = config.store_kind.create();
+    let mut store = config.store_kind.create(&config)?;
     fill_store(store.as_mut(), config.num_keys)?;
 
     let mut key_gen = KeyGenerator::new(config.num_keys);

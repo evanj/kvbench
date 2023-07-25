@@ -11,8 +11,9 @@ debug = true
 #rustflags = ["-C", "target-cpu=native"]
 
 [dependencies]
-argh = "0.1.9"
-go-parse-duration = "0.1.1"
-rand = "0.8.5"
-rand_xoshiro = "0.6.0"
+argh = "0"
+go-parse-duration = "0"
+rand = "0"
+rand_xoshiro = "0"
+redis = "0"
 strum = { version = "0", features = ["derive"] }
