@@ -28,7 +28,7 @@ struct BenchmarkConfig {
     redis_url: String,
 }
 
-#[derive(strum::EnumString)]
+#[derive(strum::EnumString, strum::Display)]
 enum StoreKind {
     HashMap,
     BTreeMap,
@@ -87,7 +87,7 @@ impl KeyGenerator {
 }
 
 fn fill_store(store: &mut dyn KVStore, num_keys: usize) -> Result<(), KVError> {
-    println!("filling store with {num_keys} keys ...");
+    println!("filling with {num_keys} keys ...");
 
     let mut key_buffer: [u8; 8];
     let start = Instant::now();
@@ -146,8 +146,8 @@ fn run_bench(
 fn main() -> Result<(), KVError> {
     let config: BenchmarkConfig = argh::from_env();
     println!(
-        "running benchmark num_keys={} measure_duration={:?}",
-        config.num_keys, config.measure_duration
+        "running benchmark store_kind={} num_keys={} measure_duration={:?}",
+        config.store_kind, config.num_keys, config.measure_duration
     );
 
     let mut store = config.store_kind.create(&config)?;
