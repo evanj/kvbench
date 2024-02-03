@@ -1,8 +1,7 @@
+use kvbench::{BTreeMapStore, HashMapStore, KVError, KVStore, RedisStore};
 use rand::prelude::Distribution;
 use rand::SeedableRng;
 use std::time::{Duration, Instant};
-
-use kvbench::*;
 
 /// Configuration for the key/value benchmark.
 #[derive(argh::FromArgs)]
@@ -19,7 +18,7 @@ struct BenchmarkConfig {
     )]
     measure_duration: Duration,
 
-    /// kind of store (BTreeMap, HashMap)
+    /// kind of store (BTreeMap, HashMap, Redis)
     #[argh(option, default = "StoreKind::HashMap")]
     store_kind: StoreKind,
 
@@ -156,35 +155,4 @@ fn main() -> Result<(), KVError> {
     let mut key_gen = KeyGenerator::new(config.num_keys);
     run_bench(store.as_mut(), &mut key_gen, config.measure_duration)?;
     Ok(())
-}
-
-#[cfg(test)]
-mod test {
-    use super::*;
-
-    #[test]
-    fn test_hash_store() {
-        let mut store = HashMapStore::new();
-        store.put(b"abc", b"xyz").unwrap();
-
-        let borrowed_get_value = store.get(b"abc").unwrap();
-        assert_eq!(borrowed_get_value, b"xyz");
-
-        store.put(b"abc", b"123").unwrap();
-        //assert_eq!(borrowed_get_value, b"xyz");
-        assert_eq!(b"123", store.get(b"abc").unwrap());
-    }
-
-    #[test]
-    fn test_btree_store() {
-        let mut store = HashMapStore::new();
-        store.put(b"abc", b"xyz").unwrap();
-
-        let borrowed_get_value = store.get(b"abc").unwrap();
-        assert_eq!(borrowed_get_value, b"xyz");
-
-        store.put(b"abc", b"123").unwrap();
-        //assert_eq!(borrowed_get_value, b"xyz");
-        assert_eq!(b"123", store.get(b"abc").unwrap());
-    }
 }

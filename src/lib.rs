@@ -1,16 +1,25 @@
 use std::{
+    borrow::{Borrow, Cow},
     collections::{BTreeMap, HashMap},
     error::Error,
     fmt::Display,
+    io::Write,
+    process::{Child, Command, Stdio},
+    thread::sleep,
+    time::Duration,
 };
 
-use redis::RedisError;
+use nix::{
+    sys::signal::{self, Signal},
+    unistd::Pid,
+};
+use redis::{Commands, RedisError};
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum KVError {
     KeyNotFound,
-    // Message(String),
     RedisError(RedisError),
+    Other(String),
 }
 
 impl KVError {
@@ -32,18 +41,22 @@ impl Display for KVError {
             Self::RedisError(err) => {
                 write!(f, "redis error: {err}")
             }
+
+            Self::Other(msg) => f.write_str(msg),
         }
     }
 }
 
 impl From<RedisError> for KVError {
-    fn from(_value: RedisError) -> Self {
-        todo!()
+    fn from(err: RedisError) -> Self {
+        Self::RedisError(err)
     }
 }
 
 pub trait KVStore {
+    // Stores the key, value pair.
     fn put(&mut self, key: &[u8], value: &[u8]) -> Result<(), KVError>;
+    // Returns the value for key, or a KVError::KeyNotFound if the key is not set.
     fn get(&mut self, key: &[u8]) -> Result<&[u8], KVError>;
 }
 
@@ -128,26 +141,115 @@ impl KVStore for BTreeMapStore {
 }
 
 pub struct RedisStore {
-    // TODO
-    client: redis::Client,
     connection: redis::Connection,
+    // stores the get result since KVStore::get returns a &[u8]
+    get_result: Vec<u8>,
+
+    // incorrect warning: this is used by the Drop trait
+    // this must be last in the struct: fields are dropped in source code order and we want the
+    // connection to be closed before we shut down redis
+    #[allow(dead_code)]
+    redis_process: Option<RedisSpawner>,
 }
 
 impl RedisStore {
     pub fn new(redis_url: &str) -> Result<Self, KVError> {
-        let client = redis::Client::open(redis_url)?;
+        // TODO: rewrite using mutable vars? probably easier to understand
+        let (url, redis_process) = if redis_url.is_empty() {
+            println!("redis_url unset; starting localhost redis ...");
+            let spawner = RedisSpawner::new()
+                .map_err(|dyn_err| KVError::Other(format!("error spawning redis: {dyn_err}")))?;
+            (Cow::from(spawner.localhost_url()), Some(spawner))
+        } else {
+            (Cow::from(redis_url), None)
+        };
+
+        let client = redis::Client::open(url.borrow())?;
         let connection = client.get_connection()?;
-        Ok(Self { client, connection })
+        Ok(Self {
+            connection,
+            get_result: Vec::new(),
+            redis_process,
+        })
     }
 }
 
 impl KVStore for RedisStore {
-    fn put(&mut self, _key: &[u8], _value: &[u8]) -> Result<(), KVError> {
-        todo!()
+    fn put(&mut self, key: &[u8], value: &[u8]) -> Result<(), KVError> {
+        self.connection.set(key, value)?;
+        Ok(())
     }
 
-    fn get(&mut self, _key: &[u8]) -> Result<&[u8], KVError> {
-        todo!()
+    fn get(&mut self, key: &[u8]) -> Result<&[u8], KVError> {
+        let result: Option<Vec<u8>> = self.connection.get(key)?;
+        match result {
+            None => Err(KVError::KeyNotFound),
+            Some(result_bytes) => {
+                self.get_result = result_bytes;
+                Ok(&self.get_result)
+            }
+        }
+    }
+}
+
+struct RedisSpawner {
+    child: Child,
+}
+
+// TODO: Pick dynamically
+const REDIS_PORT: u16 = 12346;
+
+const REDIS_CONFIG: &str = r#"
+# Docs: https://redis.io/docs/management/config/
+# localhost only
+bind 127.0.0.1 ::1
+port 12346
+
+# default is notice; debug has too much
+loglevel verbose
+
+# disable snapshotting: in memory only
+save ""
+
+# TODO: experiment with these settings
+# io-threads 4
+# io-threads-do-reads no
+"#;
+
+impl RedisSpawner {
+    fn new() -> Result<Self, Box<dyn Error>> {
+        let mut child = Command::new("redis-server")
+            .arg("-")
+            .stdin(Stdio::piped())
+            .spawn()?;
+
+        // write the config
+        let mut stdin = child.stdin.take().ok_or("BUG: stdin must be pipe")?;
+        stdin.write_all(REDIS_CONFIG.as_bytes())?;
+        drop(stdin);
+
+        // TODO: wait until server is listening
+        sleep(Duration::from_millis(100));
+
+        Ok(Self { child })
+    }
+
+    // Overriding unused_self because this should eventually use a randomly selected port
+    #[allow(clippy::unused_self)]
+    fn localhost_url(&self) -> String {
+        format!("redis://localhost:{REDIS_PORT}/")
+    }
+}
+
+impl Drop for RedisSpawner {
+    fn drop(&mut self) {
+        // send SIGTERM to Redis and wait for exit
+        signal::kill(
+            Pid::from_raw(self.child.id().try_into().unwrap()),
+            Signal::SIGTERM,
+        )
+        .expect("failed to send SIGTERM to Redis child");
+        self.child.wait().expect("failed waiting for Redis to exit");
     }
 }
 
@@ -158,26 +260,39 @@ mod test {
     #[test]
     fn test_hash_store() {
         let mut store = HashMapStore::new();
-        store.put(b"abc", b"xyz").unwrap();
-
-        let borrowed_get_value = store.get(b"abc").unwrap();
-        assert_eq!(borrowed_get_value, b"xyz");
-
-        store.put(b"abc", b"123").unwrap();
-        //assert_eq!(borrowed_get_value, b"xyz");
-        assert_eq!(b"123", store.get(b"abc").unwrap());
+        test_generic_store(&mut store).expect("test failed");
     }
 
     #[test]
     fn test_btree_store() {
         let mut store = HashMapStore::new();
-        store.put(b"abc", b"xyz").unwrap();
+        test_generic_store(&mut store).expect("test failed");
+    }
 
-        let borrowed_get_value = store.get(b"abc").unwrap();
-        assert_eq!(borrowed_get_value, b"xyz");
+    #[test]
+    fn test_redis_store() {
+        let redis = RedisSpawner::new().unwrap();
+        let mut store = RedisStore::new(&redis.localhost_url()).expect("connect must succeed");
+        test_generic_store(&mut store).expect("test failed");
+    }
 
-        store.put(b"abc", b"123").unwrap();
-        //assert_eq!(borrowed_get_value, b"xyz");
-        assert_eq!(b"123", store.get(b"abc").unwrap());
+    fn test_generic_store<T: KVStore>(store: &mut T) -> Result<(), KVError> {
+        let empty_bytes = b"";
+        let foo_bytes = b"foo";
+
+        // test get/set not exists / empty bytes / over write
+        assert_eq!(store.get(empty_bytes), Err(KVError::KeyNotFound));
+        store.put(empty_bytes, empty_bytes)?;
+        assert_eq!(store.get(empty_bytes)?, empty_bytes);
+        store.put(empty_bytes, foo_bytes)?;
+        assert_eq!(store.get(empty_bytes)?, foo_bytes);
+
+        // test another key
+        assert_eq!(store.get(foo_bytes), Err(KVError::KeyNotFound));
+        store.put(foo_bytes, empty_bytes)?;
+        assert_eq!(store.get(foo_bytes)?, empty_bytes);
+        assert_eq!(store.get(empty_bytes)?, foo_bytes);
+
+        Ok(())
     }
 }
