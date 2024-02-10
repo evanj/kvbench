@@ -1,4 +1,4 @@
-use kvbench::{BTreeMapStore, HashMapStore, KVError, KVStore, RedisStore};
+use kvbench::{BTreeMapStore, HashMapStore, KVError, KVStoreSingleThreaded, RedisStore};
 use rand::prelude::Distribution;
 use rand::SeedableRng;
 use std::time::{Duration, Instant};
@@ -25,6 +25,10 @@ struct BenchmarkConfig {
     /// URL to connect to redis e.g. redis:///localhost:12345
     #[argh(option, default = "String::new()")]
     redis_url: String,
+
+    /// workers threads for both filling and benchmarking
+    #[argh(option, default = "1")]
+    worker_threads: u16,
 }
 
 #[derive(strum::EnumString, strum::Display)]
@@ -35,7 +39,7 @@ enum StoreKind {
 }
 
 impl StoreKind {
-    fn create(&self, config: &BenchmarkConfig) -> Result<Box<dyn KVStore>, KVError> {
+    fn create(&self, config: &BenchmarkConfig) -> Result<Box<dyn KVStoreSingleThreaded>, KVError> {
         match self {
             Self::HashMap => Ok(Box::new(HashMapStore::new())),
             Self::BTreeMap => Ok(Box::new(BTreeMapStore::new())),
@@ -78,14 +82,22 @@ impl KeyGenerator {
         }
     }
 
-    fn next_key(&mut self) -> &[u8] {
+    /// Generates a random key that is should exist.
+    fn random_key_exists(&mut self) -> &[u8] {
         let key = self.key_range.sample(&mut self.rng) * 2;
+        self.key_buffer = key.to_be_bytes();
+        &self.key_buffer[..]
+    }
+
+    /// Generates a random key that does not exist.
+    fn random_key_not_found(&mut self) -> &[u8] {
+        let key = self.key_range.sample(&mut self.rng) * 2 + 1;
         self.key_buffer = key.to_be_bytes();
         &self.key_buffer[..]
     }
 }
 
-fn fill_store(store: &mut dyn KVStore, num_keys: usize) -> Result<(), KVError> {
+fn fill_store(store: &mut dyn KVStoreSingleThreaded, num_keys: usize) -> Result<(), KVError> {
     println!("filling with {num_keys} keys ...");
 
     let mut key_buffer: [u8; 8];
@@ -110,7 +122,7 @@ fn fill_store(store: &mut dyn KVStore, num_keys: usize) -> Result<(), KVError> {
 }
 
 fn run_bench(
-    store: &mut dyn KVStore,
+    store: &mut dyn KVStoreSingleThreaded,
     key_gen: &mut KeyGenerator,
     measure_duration: Duration,
 ) -> Result<(), KVError> {
@@ -127,7 +139,7 @@ fn run_bench(
 
         requests += 1;
         value_bytes_array = requests.to_le_bytes();
-        let key_slice = key_gen.next_key();
+        let key_slice = key_gen.random_key_exists();
         store.put(key_slice, &value_bytes_array[..])?;
     }
 
