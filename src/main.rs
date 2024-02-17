@@ -1,4 +1,6 @@
-use kvbench::{BTreeMapStore, HashMapStore, KVError, KVStoreSingleThreaded, RedisStore};
+use kvbench::{
+    BTreeMapStore, HashMapStore, KVError, KVStore, KVStoreSingleThreaded, LockedKVStore, RedisStore,
+};
 use rand::prelude::Distribution;
 use rand::SeedableRng;
 use std::time::{Duration, Instant};
@@ -18,8 +20,8 @@ struct BenchmarkConfig {
     )]
     measure_duration: Duration,
 
-    /// kind of store (BTreeMap, HashMap, Redis)
-    #[argh(option, default = "StoreKind::HashMap")]
+    /// kind of store (STHashMap, STBTreeMap, LockedHashMap, LockedBTreeMap, Redis)
+    #[argh(option, default = "StoreKind::STHashMap")]
     store_kind: StoreKind,
 
     /// URL to connect to redis e.g. redis:///localhost:12345
@@ -33,16 +35,43 @@ struct BenchmarkConfig {
 
 #[derive(strum::EnumString, strum::Display)]
 enum StoreKind {
-    HashMap,
-    BTreeMap,
+    STHashMap,
+    STBTreeMap,
+    LockedHashMap,
+    LockedBTreeMap,
     Redis,
 }
 
 impl StoreKind {
-    fn create(&self, config: &BenchmarkConfig) -> Result<Box<dyn KVStoreSingleThreaded>, KVError> {
+    fn is_thread_safe(&self) -> bool {
         match self {
-            Self::HashMap => Ok(Box::new(HashMapStore::new())),
-            Self::BTreeMap => Ok(Box::new(BTreeMapStore::new())),
+            Self::STHashMap => false,
+            Self::STBTreeMap => false,
+            Self::LockedHashMap => true,
+            Self::LockedBTreeMap => true,
+            Self::Redis => true,
+        }
+    }
+
+    fn create_single_threaded(
+        &self,
+        config: &BenchmarkConfig,
+    ) -> Result<Box<dyn KVStoreSingleThreaded>, KVError> {
+        match self {
+            Self::STHashMap => Ok(Box::new(HashMapStore::new())),
+            Self::STBTreeMap => Ok(Box::new(BTreeMapStore::new())),
+            Self::LockedHashMap => KVError::new_other("is threaded"),
+            Self::LockedBTreeMap => KVError::new_other("is threaded"),
+            Self::Redis => KVError::new_other("is threaded"),
+        }
+    }
+
+    fn create_thread_safe(&self, config: &BenchmarkConfig) -> Result<Box<dyn KVStore>, KVError> {
+        match self {
+            Self::STHashMap => KVError::new_other("not thread-safe"),
+            Self::STBTreeMap => KVError::new_other("not thread-safe"),
+            Self::LockedHashMap => Ok(Box::new(LockedKVStore::new(HashMapStore::new()))),
+            Self::LockedBTreeMap => Ok(Box::new(LockedKVStore::new(BTreeMapStore::new()))),
             Self::Redis => Ok(Box::new(RedisStore::new(&config.redis_url)?)),
         }
     }
@@ -161,10 +190,28 @@ fn main() -> Result<(), KVError> {
         config.store_kind, config.num_keys, config.measure_duration
     );
 
-    let mut store = config.store_kind.create(&config)?;
-    fill_store(store.as_mut(), config.num_keys)?;
+    if !config.store_kind.is_thread_safe() {
+        if config.worker_threads != 1 {
+            eprintln!(
+                "error: store_kind={} is not thread-safe; must specify worker_threads=1 (was {})",
+                config.store_kind, config.worker_threads
+            );
+            return KVError::new_other("incorrect configuration");
+        }
 
-    let mut key_gen = KeyGenerator::new(config.num_keys);
-    run_bench(store.as_mut(), &mut key_gen, config.measure_duration)?;
-    Ok(())
+        let mut store = config.store_kind.create_single_threaded(&config)?;
+        fill_store(store.as_mut(), config.num_keys)?;
+
+        let mut key_gen = KeyGenerator::new(config.num_keys);
+        run_bench(store.as_mut(), &mut key_gen, config.measure_duration)?;
+        Ok(())
+    } else {
+        let mut store = config.store_kind.create_thread_safe(&config)?;
+        todo!()
+        // fill_store(store.as_mut(), config.num_keys)?;
+
+        // let mut key_gen = KeyGenerator::new(config.num_keys);
+        // run_bench(store.as_mut(), &mut key_gen, config.measure_duration)?;
+        // Ok(())
+    }
 }

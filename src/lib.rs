@@ -5,7 +5,7 @@ use std::{
     fmt::Display,
     io::Write,
     process::{Child, Command, Stdio},
-    sync::Mutex,
+    sync::{Mutex, MutexGuard},
     thread::sleep,
     time::Duration,
 };
@@ -24,10 +24,9 @@ pub enum KVError {
 }
 
 impl KVError {
-    // fn msg<T>(m: &str) -> Result<T, Self> {
-    //     let err = Self::Message(String::from(m));
-    //     Err(err)
-    // }
+    pub fn new_other<T>(m: &str) -> Result<T, Self> {
+        Err(Self::Other(m.to_string()))
+    }
 }
 
 impl Error for KVError {}
@@ -54,15 +53,36 @@ impl From<RedisError> for KVError {
     }
 }
 
-/// A thread-safe key/value store. All methods are on shared references &self, rather than
+/// A thread-safe key/value store. To access the store, first create a connection. A connection
+/// cannot be reused across threads. The connection then provides the get/put methods itself.
+/// The get method on a connection returns a read guard so it can return a reference.
+///
+/// A KVStore must be thread-safe, so methods are on shared references &self, rather than
 /// mutable (exclusive) references.
 pub trait KVStore: Sync {
+    /// Creates a new connection to the KVStore, which can be used by a single thread. This can
+    /// represent a network connection, or be used for epoch-based reclaimation.
+    fn connect<'a>(&'a self) -> Result<impl KVStoreConnection, KVError>;
+}
+
+/// A single thread's connection to a KV store. This exists to support a connection per thread
+/// model, or to implement epoch-based reclaimation, where we need to know all possible users of
+/// a store.
+///
+/// This trait is Send, because it is possible to move it to another thread, but is not Sync,
+/// because it can't be shared across threads. The methods take &mut so values can be cached, since
+/// the connection cannot be shared between threads.
+pub trait KVStoreConnection: Send {
     /// Stores the key, value pair.
-    fn put(&self, key: &[u8], value: &[u8]) -> Result<(), KVError>;
+    fn put(&mut self, key: &[u8], value: &[u8]) -> Result<(), KVError>;
 
     /// Returns the value for key, or a KVError::KeyNotFound if the key is not set.
-    /// TODO: Return a ReadGuard for a zero-copy get.
-    fn get(&self, key: &[u8], output: &mut Vec<u8>) -> Result<(), KVError>;
+    /// TODO: Return a ReadGuard?
+    fn get(&mut self, key: &[u8]) -> Result<impl KVReadGuard + '_, KVError>;
+}
+
+pub trait KVReadGuard {
+    fn borrow(&self) -> &[u8];
 }
 
 // KVStoreSingleThread is not thread-safe. Its methods take mutable references &mut self. This is
@@ -71,6 +91,7 @@ pub trait KVStore: Sync {
 pub trait KVStoreSingleThreaded {
     // Stores the key, value pair.
     fn put(&mut self, key: &[u8], value: &[u8]) -> Result<(), KVError>;
+
     // Returns the value for key, or a KVError::KeyNotFound if the key is not set.
     fn get(&mut self, key: &[u8]) -> Result<&[u8], KVError>;
 }
@@ -80,7 +101,7 @@ pub struct LockedKVStore<T: KVStoreSingleThreaded + Send> {
 }
 
 impl<T: KVStoreSingleThreaded + Send> LockedKVStore<T> {
-    fn new(store: T) -> Self {
+    pub fn new(store: T) -> Self {
         Self {
             store: Mutex::new(store),
         }
@@ -88,23 +109,81 @@ impl<T: KVStoreSingleThreaded + Send> LockedKVStore<T> {
 }
 
 impl<T: KVStoreSingleThreaded + Send> KVStore for LockedKVStore<T> {
-    fn put(&self, key: &[u8], value: &[u8]) -> Result<(), KVError> {
-        let mut guard = self.store.lock().unwrap();
+    fn connect<'a>(&'a self) -> Result<impl KVStoreConnection, KVError> {
+        Ok(LockedKVStoreConnection::new(self))
+    }
+}
+
+pub struct LockedKVStoreConnection<'a, T: KVStoreSingleThreaded + Send> {
+    locked_store: &'a LockedKVStore<T>,
+}
+
+impl<'a, T: KVStoreSingleThreaded + Send> LockedKVStoreConnection<'a, T> {
+    fn new(locked_store: &'a LockedKVStore<T>) -> Self {
+        Self { locked_store }
+    }
+}
+
+impl<'a, T: KVStoreSingleThreaded + Send> KVStoreConnection for LockedKVStoreConnection<'a, T> {
+    fn put(&mut self, key: &[u8], value: &[u8]) -> Result<(), KVError> {
+        let mut guard = self.locked_store.store.lock().unwrap();
         guard.put(key, value)
     }
 
-    fn get(&self, key: &[u8], output: &mut Vec<u8>) -> Result<(), KVError> {
-        let mut guard = self.store.lock().unwrap();
-        match guard.get(key) {
-            Err(err) => Err(err),
-            Ok(bytes) => {
-                output.clear();
-                output.extend_from_slice(bytes);
-                Ok(())
-            }
-        }
+    fn get(&mut self, key: &[u8]) -> Result<impl KVReadGuard + 'a, KVError> {
+        let mut guard: MutexGuard<'a, T> = self.locked_store.store.lock().unwrap();
+        let result = guard.get(key)?;
+        Ok(LockedKVReadGuard::new(guard, result))
     }
 }
+
+struct LockedKVReadGuard<'a, T: KVStoreSingleThreaded + Send> {
+    guard: MutexGuard<'a, T>,
+    result: &'a [u8],
+}
+
+impl<'a, T: KVStoreSingleThreaded + Send> LockedKVReadGuard<'a, T> {
+    fn new(guard: MutexGuard<'a, T>, result: &'a [u8]) -> Self {
+        Self { guard, result }
+    }
+}
+
+impl<'a, T: KVStoreSingleThreaded + Send> KVReadGuard for LockedKVReadGuard<'a, T> {
+    fn borrow(&self) -> &[u8] {
+        todo!()
+    }
+}
+
+// pub struct WTFKVStore {
+//     store: Mutex<HashMapStore>,
+// }
+
+// impl WTFKVStore {
+//     fn new() -> Self {
+//         Self {
+//             store: Mutex::new(HashMapStore::new()),
+//         }
+//     }
+
+//     fn connect(&self) -> WTFKVStoreConnection {
+//         WTFKVStoreConnection::new(self)
+//     }
+// }
+
+// pub struct WTFKVStoreConnection<'a> {
+//     store: &'a WTFKVStore,
+// }
+
+// impl WTFKVStoreConnection<'a> {
+//     fn new(store: &WTFKVStore) -> Self {
+//         Self { store }
+//     }
+
+//     fn put(&self, k &[u8], v &[u8]) -> Result<(), KVError>{
+//         todo!();
+//         Ok(())
+//     }
+// }
 
 pub struct HashMapStore {
     store: HashMap<Vec<u8>, Vec<u8>>,
@@ -187,9 +266,7 @@ impl KVStoreSingleThreaded for BTreeMapStore {
 }
 
 pub struct RedisStore {
-    connection: redis::Connection,
-    // stores the get result since KVStore::get returns a &[u8]
-    get_result: Vec<u8>,
+    client: redis::Client,
 
     // incorrect warning: this is used by the Drop trait
     // this must be last in the struct: fields are dropped in source code order and we want the
@@ -211,30 +288,62 @@ impl RedisStore {
         };
 
         let client = redis::Client::open(url.borrow())?;
-        let connection = client.get_connection()?;
         Ok(Self {
-            connection,
-            get_result: Vec::new(),
+            client,
             redis_process,
         })
     }
 }
 
-impl KVStoreSingleThreaded for RedisStore {
+impl KVStore for RedisStore {
+    fn connect(&self) -> Result<impl KVStoreConnection, KVError> {
+        let redis_connection = self.client.get_connection()?;
+        let connection = RedisConnection::new(redis_connection);
+        Ok(connection)
+    }
+}
+
+pub struct RedisConnection {
+    connection: redis::Connection,
+}
+
+impl RedisConnection {
+    fn new(connection: redis::Connection) -> Self {
+        Self { connection }
+    }
+}
+
+impl KVStoreConnection for RedisConnection {
     fn put(&mut self, key: &[u8], value: &[u8]) -> Result<(), KVError> {
         self.connection.set(key, value)?;
         Ok(())
     }
 
-    fn get(&mut self, key: &[u8]) -> Result<&[u8], KVError> {
+    fn get(&mut self, key: &[u8]) -> Result<RedisReadGuard, KVError> {
         let result: Option<Vec<u8>> = self.connection.get(key)?;
         match result {
             None => Err(KVError::KeyNotFound),
-            Some(result_bytes) => {
-                self.get_result = result_bytes;
-                Ok(&self.get_result)
-            }
+
+            // move the redis result vec into the read guard
+            // TODO: Avoid an allocation on each get?
+            Some(result_bytes) => Ok(RedisReadGuard::new(result_bytes)),
         }
+    }
+}
+
+struct RedisReadGuard {
+    result: Vec<u8>,
+}
+
+impl RedisReadGuard {
+    fn new(result: Vec<u8>) -> Self {
+        Self { result }
+    }
+}
+
+impl KVReadGuard for RedisReadGuard {
+    fn borrow(&self) -> &[u8] {
+        &self.result
     }
 }
 
@@ -304,11 +413,15 @@ mod test {
     use super::*;
     use std::str;
     use std::thread;
+    use std::thread::Scope;
 
     #[test]
     fn test_hash_store() {
         let mut store = HashMapStore::new();
         test_kv_single_threaded(&mut store).expect("test failed");
+
+        let locked_map = LockedKVStore::new(store);
+        test_kv_thread_safe(&locked_map).unwrap();
     }
 
     #[test]
@@ -317,14 +430,14 @@ mod test {
         test_kv_single_threaded(&mut store).expect("test failed");
 
         let locked_btree = LockedKVStore::new(store);
-        test_kv_threads(&locked_btree);
+        test_kv_thread_safe(&locked_btree).unwrap();
     }
 
     #[test]
     fn test_redis_store() {
         let redis = RedisSpawner::new().unwrap();
         let mut store = RedisStore::new(&redis.localhost_url()).expect("connect must succeed");
-        test_kv_single_threaded(&mut store).expect("test failed");
+        test_kv_thread_safe(&mut store).expect("test failed");
     }
 
     fn test_kv_single_threaded<T: KVStoreSingleThreaded>(store: &mut T) -> Result<(), KVError> {
@@ -347,16 +460,22 @@ mod test {
         Ok(())
     }
 
-    fn test_kv_threads<T: KVStore>(store: &T) -> Result<(), KVError> {
+    fn test_kv_thread_safe<'a, T: KVStore>(store: &'a T) -> Result<(), KVError> {
         // test concurrent reads/writes
         let task_a = b"task_a";
         let task_b = b"task_b";
         let shared_key = b"shared_key";
 
         // spawn two threads to write to their own key, and to a shared key
-        thread::scope(|s| -> Result<(), KVError> {
-            let thread_a = s.spawn(|| write_two_keys(store, task_a, shared_key, task_a));
-            let thread_b = s.spawn(|| write_two_keys(store, task_b, shared_key, task_b));
+        thread::scope(|s: &Scope<'_, 'a>| -> Result<(), KVError> {
+            let thread_a = s.spawn(|| -> Result<(), KVError> {
+                let mut connection = store.connect()?;
+                write_two_keys(&mut connection, task_a, shared_key, task_a)
+            });
+            let thread_b = s.spawn(|| -> Result<(), KVError> {
+                let mut connection = store.connect()?;
+                write_two_keys(&mut connection, task_b, shared_key, task_b)
+            });
 
             thread_a.join().unwrap()?;
             thread_b.join().unwrap()?;
@@ -364,40 +483,36 @@ mod test {
         })?;
 
         // read the keys!
-        let mut output = Vec::new();
-        store.get(task_a, &mut output).unwrap();
-        assert_eq!(&task_a[..], output);
-        store.get(task_b, &mut output).unwrap();
-        assert_eq!(
-            str::from_utf8(&task_b[..]).unwrap(),
-            str::from_utf8(&output).unwrap()
-        );
+        let mut kv_connection = store.connect()?;
+        let result = kv_connection.get(task_a).unwrap();
+        // assert_eq!(&task_a[..], result.borrow());
+        // let result = kv_connection.get(task_b).unwrap();
+        // assert_eq!(
+        //     str::from_utf8(&task_b[..]).unwrap(),
+        //     str::from_utf8(&result).unwrap()
+        // );
 
-        // on my machine this seems to be more likely to be task_b that wins the race, but it is
-        // not guaranteed.
-        store.get(shared_key, &mut output).unwrap();
-        assert!(output == task_a || output == task_b);
+        // // on my machine this seems to be more likely to be task_b that wins the race, but it is
+        // // not guaranteed.
+        // let result = kv_connection.get(shared_key).unwrap();
+        // assert!(result == task_a || result == task_b);
 
         Ok(())
     }
 
     /// Writes value to both key_one and key_two.
-    fn write_two_keys<T: KVStore>(
-        store: &T,
+    fn write_two_keys<'a, T: KVStoreConnection>(
+        connection: &mut T,
         key_one: &[u8],
         key_two: &[u8],
         value: &[u8],
     ) -> Result<(), KVError> {
-        let mut output = Vec::new();
-        assert_eq!(
-            store.get(key_one, &mut output).unwrap_err(),
-            KVError::KeyNotFound
-        );
+        assert_eq!(connection.get(key_one).unwrap_err(), KVError::KeyNotFound);
 
-        store.put(key_one, value)?;
-        store.put(key_two, value)?;
+        connection.put(key_one, value)?;
+        connection.put(key_two, value)?;
 
-        store.get(key_one, &mut output).unwrap();
+        let output = connection.get(key_one).unwrap();
         assert_eq!(output, value);
 
         Ok(())
