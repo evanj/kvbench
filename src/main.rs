@@ -1,39 +1,39 @@
-use kvbench::{
-    BTreeMapStore, HashMapStore, KVError, KVStore, KVStoreSingleThreaded, LockedKVStore, RedisStore,
-};
+use clap::Parser;
+use kvbench::{BTreeMapStore, HashMapStore, KVError, KVStoreSingleThreaded, RedisStore};
 use rand::prelude::Distribution;
 use rand::SeedableRng;
 use std::time::{Duration, Instant};
 
 /// Configuration for the key/value benchmark.
-#[derive(argh::FromArgs)]
+#[derive(clap::Parser)]
+#[command(version, about)]
 struct BenchmarkConfig {
     /// number of keys.
-    #[argh(option, default = "10")]
+    #[arg(long, default_value_t = 10)]
     num_keys: usize,
 
     /// measurement duration.
-    #[argh(
-        option,
-        default = "Duration::from_secs(10)",
-        from_str_fn(argh_parse_go_duration)
+    #[arg(
+        long, default_value = "Duration::from_secs(10)",
+        value_parser=parse_go_duration,
     )]
     measure_duration: Duration,
 
-    /// kind of store (STHashMap, STBTreeMap, LockedHashMap, LockedBTreeMap, Redis)
-    #[argh(option, default = "StoreKind::STHashMap")]
+    /// kind of store (`STHashMap`, `STBTreeMap`, `LockedHashMap`, `LockedBTreeMap`, `Redis`)
+    #[arg(long, default_value_t = StoreKind::STHashMap)]
     store_kind: StoreKind,
 
-    /// URL to connect to redis e.g. redis:///localhost:12345
-    #[argh(option, default = "String::new()")]
+    /// URL to connect to redis e.g. <redis:///localhost:12345>
+    #[arg(long, default_value = "")]
     redis_url: String,
 
     /// workers threads for both filling and benchmarking
-    #[argh(option, default = "1")]
+    // #[argh(option, default = "1")]
+    #[arg(long, default_value_t = 1)]
     worker_threads: u16,
 }
 
-#[derive(strum::EnumString, strum::Display)]
+#[derive(strum::EnumString, strum::Display, Clone, PartialEq)]
 enum StoreKind {
     STHashMap,
     STBTreeMap,
@@ -43,42 +43,30 @@ enum StoreKind {
 }
 
 impl StoreKind {
-    fn is_thread_safe(&self) -> bool {
-        match self {
-            Self::STHashMap => false,
-            Self::STBTreeMap => false,
-            Self::LockedHashMap => true,
-            Self::LockedBTreeMap => true,
-            Self::Redis => true,
-        }
+    const fn is_thread_safe(&self) -> bool {
+        !matches!(self, Self::STHashMap | Self::STBTreeMap)
     }
 
-    fn create_single_threaded(
-        &self,
-        config: &BenchmarkConfig,
-    ) -> Result<Box<dyn KVStoreSingleThreaded>, KVError> {
+    fn create_single_threaded(&self) -> Result<Box<dyn KVStoreSingleThreaded>, KVError> {
         match self {
             Self::STHashMap => Ok(Box::new(HashMapStore::new())),
             Self::STBTreeMap => Ok(Box::new(BTreeMapStore::new())),
-            Self::LockedHashMap => KVError::new_other("is threaded"),
-            Self::LockedBTreeMap => KVError::new_other("is threaded"),
-            Self::Redis => KVError::new_other("is threaded"),
+            _ => KVError::new_other("is threaded"),
         }
     }
 
-    fn create_thread_safe(&self, config: &BenchmarkConfig) -> Result<Box<dyn KVStore>, KVError> {
-        match self {
-            Self::STHashMap => KVError::new_other("not thread-safe"),
-            Self::STBTreeMap => KVError::new_other("not thread-safe"),
-            Self::LockedHashMap => Ok(Box::new(LockedKVStore::new(HashMapStore::new()))),
-            Self::LockedBTreeMap => Ok(Box::new(LockedKVStore::new(BTreeMapStore::new()))),
-            Self::Redis => Ok(Box::new(RedisStore::new(&config.redis_url)?)),
+    // TODO: Support other types
+    fn create_thread_safe(&self, config: &BenchmarkConfig) -> Result<RedisStore, KVError> {
+        if *self == Self::Redis {
+            RedisStore::new(&config.redis_url)
+        } else {
+            KVError::new_other("unsupported type")
         }
     }
 }
 
 /// Parses a duration using Go's formats, with the signature required by argh.
-fn argh_parse_go_duration(s: &str) -> Result<Duration, String> {
+fn parse_go_duration(s: &str) -> Result<Duration, String> {
     let result = go_parse_duration::parse_duration(s);
     match result {
         Err(err) => Err(format!("{err:?}")),
@@ -119,6 +107,8 @@ impl KeyGenerator {
     }
 
     /// Generates a random key that does not exist.
+    // TODO: Use this?
+    #[allow(dead_code)]
     fn random_key_not_found(&mut self) -> &[u8] {
         let key = self.key_range.sample(&mut self.rng) * 2 + 1;
         self.key_buffer = key.to_be_bytes();
@@ -184,13 +174,21 @@ fn run_bench(
 }
 
 fn main() -> Result<(), KVError> {
-    let config: BenchmarkConfig = argh::from_env();
+    let config = BenchmarkConfig::parse();
     println!(
         "running benchmark store_kind={} num_keys={} measure_duration={:?}",
         config.store_kind, config.num_keys, config.measure_duration
     );
 
-    if !config.store_kind.is_thread_safe() {
+    if config.store_kind.is_thread_safe() {
+        let _store = config.store_kind.create_thread_safe(&config)?;
+        todo!("finish thread safe")
+        // fill_store(store, config.num_keys)?;
+
+        // let mut key_gen = KeyGenerator::new(config.num_keys);
+        // run_bench(store.as_mut(), &mut key_gen, config.measure_duration)?;
+        // Ok(())
+    } else {
         if config.worker_threads != 1 {
             eprintln!(
                 "error: store_kind={} is not thread-safe; must specify worker_threads=1 (was {})",
@@ -199,19 +197,11 @@ fn main() -> Result<(), KVError> {
             return KVError::new_other("incorrect configuration");
         }
 
-        let mut store = config.store_kind.create_single_threaded(&config)?;
+        let mut store = config.store_kind.create_single_threaded()?;
         fill_store(store.as_mut(), config.num_keys)?;
 
         let mut key_gen = KeyGenerator::new(config.num_keys);
         run_bench(store.as_mut(), &mut key_gen, config.measure_duration)?;
         Ok(())
-    } else {
-        let mut store = config.store_kind.create_thread_safe(&config)?;
-        todo!()
-        // fill_store(store.as_mut(), config.num_keys)?;
-
-        // let mut key_gen = KeyGenerator::new(config.num_keys);
-        // run_bench(store.as_mut(), &mut key_gen, config.measure_duration)?;
-        // Ok(())
     }
 }

@@ -2,6 +2,17 @@
 name = "kvbench"
 version = "0.1.0"
 edition = "2021"
+publish = false
+
+[lints.clippy]
+nursery = "deny"
+pedantic = "deny"
+style = "deny"
+cargo = "deny"
+option-if-let-else =  { level = "allow", priority = 1 }
+#multiple-crate-versions = { level = "allow", priority = 1 }
+missing-errors-doc = { level = "allow", priority = 1 }
+cast-precision-loss = { level = "allow", priority = 1 }
 
 [profile.release-nativecpu]
 inherits = "release"
@@ -12,6 +23,7 @@ debug = true
 
 [dependencies]
 argh = "0"
+clap = { version = "4", features = ["derive"] }
 go-parse-duration = "0"
 nix = { version = "0", features = ["signal"] }
 rand = "0"

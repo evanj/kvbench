@@ -1,0 +1,4 @@
+# See: https://doc.rust-lang.org/clippy/configuration.html
+
+# See: https://rust-lang.github.io/rust-clippy/master/index.html#/doc_markdown
+doc-valid-idents = ["KVStore", ".."]
