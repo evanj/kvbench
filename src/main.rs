@@ -67,7 +67,7 @@ fn parse_go_duration(s: &str) -> Result<Duration, String> {
 }
 
 struct KeyGenerator {
-    rng: rand_xoshiro::Xoshiro256Plus,
+    rng: rand::rngs::SmallRng,
     // num_keys: usize,
     key_buffer: [u8; 8],
     key_range: rand::distributions::Uniform<u64>,
@@ -75,9 +75,7 @@ struct KeyGenerator {
 
 impl KeyGenerator {
     fn new(num_keys: usize) -> Self {
-        // the rand book suggests Xoshiro256Plus is fast and pretty good:
-        // https://rust-random.github.io/book/guide-rngs.html
-        let rng = rand_xoshiro::Xoshiro256Plus::from_entropy();
+        let rng = rand::rngs::SmallRng::from_entropy();
         Self {
             rng,
             // num_keys,
@@ -163,7 +161,7 @@ fn main() -> Result<(), KVError> {
 }
 
 fn fill_store<T: KVStoreConnection>(connection: &mut T, num_keys: usize) -> Result<(), KVError> {
-    println!("filling with {num_keys} keys ...");
+    println!("filling with {num_keys} keys using 1 thread ...");
 
     // TODO: fill on multiple threads
     let mut key_buffer: [u8; 8];
@@ -179,7 +177,7 @@ fn fill_store<T: KVStoreConnection>(connection: &mut T, num_keys: usize) -> Resu
     let duration = end - start;
     let data_bytes = 16 * num_keys;
     println!(
-        "filled in {duration:?} ; {:.1} keys/sec; {:.1} MiB of data",
+        "filled with 1 thread in {duration:?} ; {:.1} keys/sec; {:.1} MiB of data",
         num_keys as f64 / duration.as_secs_f64(),
         data_bytes as f64 / 1024.0 / 1024.0,
     );

@@ -22,12 +22,10 @@ debug = true
 #rustflags = ["-C", "target-cpu=native"]
 
 [dependencies]
-argh = "0"
 clap = { version = "4", features = ["derive"] }
 go-parse-duration = "0"
 nix = { version = "0", features = ["signal"] }
-rand = "0"
-rand_xoshiro = "0"
+rand = { version = "0", features = ["small_rng"] }
 # we are not using the async API and it pulls in a lot of dependencies
 redis = { version = "0", default-features = false } 
 strum = { version = "0", features = ["derive"] }
