@@ -3,8 +3,8 @@
 set -euf -o pipefail
 
 KVBENCH="target/release-nativecpu/kvbench"
-STORE_LIST=(STBTreeMap STHashMap Redis)
-#STORE_LIST=(STBTreeMap LockedBTreeMap STHashMap LockedHashMap Redis)
+#STORE_LIST=(STBTreeMap STHashMap Redis)
+STORE_LIST=(STBTreeMap LockedBTreeMap STHashMap LockedHashMap Redis)
 KEYS_LIST=(10000 100000 1000000)
 
 for STORE in "${STORE_LIST[@]}"; do

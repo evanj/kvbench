@@ -98,12 +98,36 @@ pub trait KVReadGuard<'a>: Debug {
 // KVStoreSingleThread is not thread-safe. Its methods take mutable references &mut self. This is
 // true even for get, since there may be caching or other things. This trait exists for
 // LockedKVStore.
-pub trait KVStoreSingleThreaded {
+pub trait KVStoreSingleThreaded: Send {
     // Stores the key, value pair.
     fn put(&mut self, key: &[u8], value: &[u8]) -> Result<(), KVError>;
 
     // Returns an `Option<&[u8]>` on success, or a KVError.
     fn get(&mut self, key: &[u8]) -> Result<Option<&[u8]>, KVError>;
+}
+
+pub struct KVStoreSingleThreadedConnection<'a, StoreT: KVStoreSingleThreaded> {
+    store: &'a mut StoreT,
+}
+
+impl<'a, StoreT: KVStoreSingleThreaded> KVStoreSingleThreadedConnection<'a, StoreT> {
+    pub fn new(store: &'a mut StoreT) -> Self {
+        Self { store }
+    }
+}
+
+impl<'a, StoreT: KVStoreSingleThreaded> KVStoreConnection
+    for KVStoreSingleThreadedConnection<'a, StoreT>
+{
+    type ReadGuard<'b> = KVSingleThreadedReadGuard<'b, StoreT> where Self: 'b;
+
+    fn put(&mut self, key: &[u8], value: &[u8]) -> Result<(), KVError> {
+        self.store.put(key, value)
+    }
+
+    fn get_guard(&mut self) -> Result<Self::ReadGuard<'_>, KVError> {
+        Ok(Self::ReadGuard::new(self.store))
+    }
 }
 
 pub struct LockedKVStore<T: KVStoreSingleThreaded> {
@@ -214,6 +238,40 @@ impl KVStoreSingleThreaded for HashMapStore {
         } else {
             Ok(None)
         }
+    }
+}
+
+impl KVStoreConnection for HashMapStore {
+    type ReadGuard<'a> = KVSingleThreadedReadGuard<'a, Self>;
+
+    fn put(&mut self, key: &[u8], value: &[u8]) -> Result<(), KVError> {
+        KVStoreSingleThreaded::put(self, key, value)
+    }
+
+    fn get_guard(&mut self) -> Result<Self::ReadGuard<'_>, KVError> {
+        Ok(Self::ReadGuard::new(self))
+    }
+}
+
+pub struct KVSingleThreadedReadGuard<'a, StoreT: KVStoreSingleThreaded> {
+    store: &'a mut StoreT,
+}
+
+impl<StoreT: KVStoreSingleThreaded> Debug for KVSingleThreadedReadGuard<'_, StoreT> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "KVSingleThreadedReadGuard TODO")
+    }
+}
+
+impl<'a, StoreT: KVStoreSingleThreaded> KVSingleThreadedReadGuard<'a, StoreT> {
+    fn new(store: &'a mut StoreT) -> Self {
+        Self { store }
+    }
+}
+
+impl<'a, StoreT: KVStoreSingleThreaded> KVReadGuard<'a> for KVSingleThreadedReadGuard<'a, StoreT> {
+    fn get(&mut self, key: &[u8]) -> Result<Option<&[u8]>, KVError> {
+        self.store.get(key)
     }
 }
 

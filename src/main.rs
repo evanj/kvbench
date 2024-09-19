@@ -1,7 +1,7 @@
 use clap::Parser;
 use kvbench::{
     BTreeMapStore, HashMapStore, KVError, KVStore, KVStoreConnection, KVStoreSingleThreaded,
-    RedisStore,
+    KVStoreSingleThreadedConnection, LockedKVStore, RedisStore,
 };
 use rand::prelude::Distribution;
 use rand::SeedableRng;
@@ -10,7 +10,7 @@ use std::{
         atomic::{self, AtomicBool},
         Arc,
     },
-    thread,
+    thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
 
@@ -50,29 +50,6 @@ enum StoreKind {
     LockedHashMap,
     LockedBTreeMap,
     Redis,
-}
-
-impl StoreKind {
-    const fn is_thread_safe(&self) -> bool {
-        !matches!(self, Self::STHashMap | Self::STBTreeMap)
-    }
-
-    fn create_single_threaded(&self) -> Result<Box<dyn KVStoreSingleThreaded>, KVError> {
-        match self {
-            Self::STHashMap => Ok(Box::new(HashMapStore::new())),
-            Self::STBTreeMap => Ok(Box::new(BTreeMapStore::new())),
-            _ => KVError::new_other("is threaded"),
-        }
-    }
-
-    // TODO: Support other types
-    fn create_thread_safe(&self, config: &BenchmarkConfig) -> Result<RedisStore, KVError> {
-        if *self == Self::Redis {
-            RedisStore::new(&config.redis_url)
-        } else {
-            KVError::new_other("unsupported type")
-        }
-    }
 }
 
 /// Parses a duration using Go's formats, with the signature required by argh.
@@ -126,60 +103,31 @@ impl KeyGenerator {
     }
 }
 
-fn fill_store(store: &mut dyn KVStoreSingleThreaded, num_keys: usize) -> Result<(), KVError> {
-    println!("filling with {num_keys} keys ...");
-
-    let mut key_buffer: [u8; 8];
-    let start = Instant::now();
-    for i in 0..num_keys {
-        let k = i as u64 * 2;
-        key_buffer = k.to_be_bytes();
-        // println!("put i={i} k={k} bytes={:x?}", &key_buffer[..]);
-        let key_slice = &key_buffer[..];
-        store.put(key_slice, key_slice)?;
-    }
-    let end = Instant::now();
-    let duration = end - start;
-    let data_bytes = 16 * num_keys;
-    println!(
-        "filled in {duration:?} ; {:.1} keys/sec; {:.1} MiB of data",
-        num_keys as f64 / duration.as_secs_f64(),
-        data_bytes as f64 / 1024.0 / 1024.0,
-    );
-
-    Ok(())
-}
-
-fn run_bench(
-    store: &mut dyn KVStoreSingleThreaded,
-    key_gen: &mut KeyGenerator,
-    measure_duration: Duration,
+fn run_bench_single_threaded<StoreT: KVStoreSingleThreaded + 'static>(
+    mut store: StoreT,
+    config: &BenchmarkConfig,
 ) -> Result<(), KVError> {
-    let mut requests = 0usize;
-    let start = Instant::now();
-    let measure_end = start + measure_duration;
-
-    let mut value_bytes_array: [u8; 8];
-    loop {
-        let now = Instant::now();
-        if now >= measure_end {
-            break;
-        }
-
-        requests += 1;
-        value_bytes_array = requests.to_le_bytes();
-        let key_slice = key_gen.random_key_exists();
-        store.put(key_slice, &value_bytes_array[..])?;
+    if config.num_threads != 1 {
+        return KVError::new_other(format!(
+            "type {} is single threaded; num_threads must be 1 (is {})",
+            config.store_kind, config.num_threads
+        ));
     }
 
-    let end = Instant::now();
-    let duration = end - start;
-    println!(
-        "{} requests in {duration:?}; {:.3} requests/sec",
-        requests,
-        requests as f64 / duration.as_secs_f64()
-    );
+    let mut connection = KVStoreSingleThreadedConnection::new(&mut store);
+    fill_store(&mut connection, config.num_keys)?;
 
+    let key_gen = KeyGenerator::new(config.num_keys);
+
+    let stop_test = Arc::new(AtomicBool::new(false));
+    let thread_stop_test = stop_test.clone();
+
+    let thread_handles = vec![thread::spawn(move || {
+        let connection = KVStoreSingleThreadedConnection::new(&mut store);
+        simulate_work_single_thread(connection, key_gen, &thread_stop_test)
+    })];
+
+    wait_for_bench(thread_handles, &stop_test, config.measure_duration);
     Ok(())
 }
 
@@ -190,40 +138,34 @@ fn main() -> Result<(), KVError> {
         config.store_kind, config.num_keys, config.measure_duration
     );
 
-    if config.store_kind.is_thread_safe() {
-        let _store = config.store_kind.create_thread_safe(&config)?;
-        match config.store_kind {
-            StoreKind::Redis => {
-                let store = RedisStore::new(&config.redis_url)?;
-                fill_thread_safe(&store, config.num_keys)?;
-                run_thread_safe_workload(&store, &config)
-            }
-            _ => KVError::new_other(format!("{} is not thread-safe", config.store_kind)),
+    match config.store_kind {
+        StoreKind::STBTreeMap => {
+            let store = BTreeMapStore::new();
+            run_bench_single_threaded(store, &config)
         }
-    } else {
-        if config.num_threads != 1 {
-            eprintln!(
-                "error: store_kind={} is not thread-safe; must specify worker_threads=1 (was {})",
-                config.store_kind, config.num_threads
-            );
-            return KVError::new_other("incorrect configuration");
+        StoreKind::STHashMap => {
+            let store = HashMapStore::new();
+            run_bench_single_threaded(store, &config)
         }
-
-        let mut store = config.store_kind.create_single_threaded()?;
-        fill_store(store.as_mut(), config.num_keys)?;
-
-        let mut key_gen = KeyGenerator::new(config.num_keys);
-        run_bench(store.as_mut(), &mut key_gen, config.measure_duration)?;
-        Ok(())
+        StoreKind::LockedBTreeMap => {
+            let store = LockedKVStore::new(BTreeMapStore::new());
+            run_bench_multi_threaded(&store, &config)
+        }
+        StoreKind::LockedHashMap => {
+            let store = LockedKVStore::new(HashMapStore::new());
+            run_bench_multi_threaded(&store, &config)
+        }
+        StoreKind::Redis => {
+            let store = RedisStore::new(&config.redis_url)?;
+            run_bench_multi_threaded(&store, &config)
+        }
     }
 }
 
-fn fill_thread_safe<T: KVStore>(store: &T, num_keys: usize) -> Result<(), KVError> {
+fn fill_store<T: KVStoreConnection>(connection: &mut T, num_keys: usize) -> Result<(), KVError> {
     println!("filling with {num_keys} keys ...");
 
     // TODO: fill on multiple threads
-    let mut connection = store.connect()?;
-
     let mut key_buffer: [u8; 8];
     let start = Instant::now();
     for i in 0..num_keys {
@@ -245,28 +187,42 @@ fn fill_thread_safe<T: KVStore>(store: &T, num_keys: usize) -> Result<(), KVErro
     Ok(())
 }
 
-fn run_thread_safe_workload<T: KVStore + 'static>(
+fn run_bench_multi_threaded<T: KVStore + 'static>(
     store: &T,
     config: &BenchmarkConfig,
 ) -> Result<(), KVError> {
+    let mut connection = store.connect()?;
+    fill_store(&mut connection, config.num_keys)?;
+
     let mut thread_handles = Vec::with_capacity(config.num_threads);
     let stop_test = Arc::new(AtomicBool::new(false));
-    let start = Instant::now();
-    let measure_end = start + config.measure_duration;
 
     for _ in 0..config.num_threads {
         let thread_connection: T::Connection = store.connect()?;
         let thread_stop_test = stop_test.clone();
         let thread_key_gen = KeyGenerator::new(config.num_keys);
         let thread_handle = std::thread::spawn(move || {
-            run_single_thread(thread_connection, thread_key_gen, &thread_stop_test)
+            simulate_work_single_thread(thread_connection, thread_key_gen, &thread_stop_test)
         });
         thread_handles.push(thread_handle);
     }
 
-    let time_remaining = measure_end - Instant::now();
-    thread::sleep(time_remaining);
+    wait_for_bench(thread_handles, &stop_test, config.measure_duration);
+
+    Ok(())
+}
+
+fn wait_for_bench(
+    thread_handles: Vec<JoinHandle<usize>>,
+    stop_test: &Arc<AtomicBool>,
+    measure_duration: Duration,
+) {
+    // TODO: Add a barrier so test threads start at closer to the same time
+    assert!(!stop_test.load(atomic::Ordering::SeqCst));
+    let start = Instant::now();
+    thread::sleep(measure_duration);
     stop_test.store(true, atomic::Ordering::SeqCst);
+    let duration = start.elapsed();
 
     let mut total_requests = 0;
     for handle in thread_handles {
@@ -274,17 +230,14 @@ fn run_thread_safe_workload<T: KVStore + 'static>(
         total_requests += requests;
     }
 
-    let end = Instant::now();
-    let duration = end - start;
     println!(
         "{total_requests} requests in {duration:?}; {:.3} requests/sec",
         total_requests as f64 / duration.as_secs_f64()
     );
-
-    Ok(())
 }
 
-fn run_single_thread<T: KVStoreConnection>(
+/// Simulates a single client in a thread using a connection.
+fn simulate_work_single_thread<T: KVStoreConnection>(
     mut connection: T,
     mut key_gen: KeyGenerator,
     stop_test: &Arc<AtomicBool>,
