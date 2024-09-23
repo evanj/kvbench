@@ -187,7 +187,7 @@ impl<'a, T: KVStoreSingleThreaded + Send> Debug for LockedKVReadGuard<'a, T> {
 
 #[allow(dead_code)]
 impl<'a, T: KVStoreSingleThreaded + Send> LockedKVReadGuard<'a, T> {
-    fn new(guard: MutexGuard<'a, T>) -> Self {
+    const fn new(guard: MutexGuard<'a, T>) -> Self {
         Self { guard }
     }
 }
@@ -372,7 +372,9 @@ impl KVStoreConnection for RedisConnection {
     type ReadGuard<'a> = RedisReadGuard<'a>;
 
     fn put(&mut self, key: &[u8], value: &[u8]) -> Result<(), KVError> {
-        self.connection.set(key, value)?;
+        // workaround upstream redis library and future Rust compiler change:
+        // https://github.com/redis-rs/redis-rs/issues/1322
+        let _result: () = self.connection.set(key, value)?;
         Ok(())
     }
 

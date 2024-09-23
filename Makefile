@@ -1,6 +1,6 @@
 all:
 	cargo fmt
-	RUST_BACKTRACE=1 cargo test
+	RUST_BACKTRACE=full cargo test
 	cargo check
 	# disallow warnings so they fail CI
 	cargo clippy --all-targets -- -D warnings
