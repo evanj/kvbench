@@ -174,7 +174,6 @@ impl<T: KVStoreSingleThreaded + Send> KVStoreConnection for LockedKVStoreConnect
     }
 }
 
-#[allow(dead_code)]
 pub struct LockedKVReadGuard<'a, T: KVStoreSingleThreaded + Send> {
     guard: MutexGuard<'a, T>,
 }
@@ -185,7 +184,6 @@ impl<'a, T: KVStoreSingleThreaded + Send> Debug for LockedKVReadGuard<'a, T> {
     }
 }
 
-#[allow(dead_code)]
 impl<'a, T: KVStoreSingleThreaded + Send> LockedKVReadGuard<'a, T> {
     const fn new(guard: MutexGuard<'a, T>) -> Self {
         Self { guard }
@@ -324,7 +322,8 @@ pub struct RedisStore {
     // incorrect warning: this is used by the Drop trait
     // this must be last in the struct: fields are dropped in source code order and we want the
     // connection to be closed before we shut down redis
-    #[allow(dead_code)]
+    // https://github.com/rust-lang/rust/issues/112290
+    #[expect(dead_code)]
     redis_process: Option<RedisSpawner>,
 }
 
@@ -335,7 +334,7 @@ impl RedisStore {
             println!("redis_url unset; starting localhost redis ...");
             let spawner = RedisSpawner::new()
                 .map_err(|dyn_err| KVError::Other(format!("error spawning redis: {dyn_err}")))?;
-            (Cow::from(spawner.localhost_url()), Some(spawner))
+            (Cow::from(RedisSpawner::localhost_url()), Some(spawner))
         } else {
             (Cow::from(redis_url), None)
         };
@@ -462,9 +461,7 @@ impl RedisSpawner {
         Ok(Self { child })
     }
 
-    // Overriding unused_self because this should eventually use a randomly selected port
-    #[allow(clippy::unused_self)]
-    fn localhost_url(&self) -> String {
+    fn localhost_url() -> String {
         format!("redis://localhost:{REDIS_PORT}/")
     }
 }
@@ -478,6 +475,80 @@ impl Drop for RedisSpawner {
         )
         .expect("failed to send SIGTERM to Redis child");
         self.child.wait().expect("failed waiting for Redis to exit");
+    }
+}
+
+pub struct SkipListStore {
+    store: Arc<crossbeam_skiplist::SkipMap<Vec<u8>, Vec<u8>>>,
+}
+
+impl SkipListStore {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            store: Arc::new(crossbeam_skiplist::SkipMap::new()),
+        }
+    }
+}
+
+impl Default for SkipListStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl KVStore for SkipListStore {
+    type Connection = SkipListConnection;
+    // type ReadGuard<'b> = KVSingleThreadedReadGuard<'b, StoreT> where Self: 'b;
+
+    fn connect(&self) -> Result<SkipListConnection, KVError> {
+        Ok(SkipListConnection::new(self.store.clone()))
+    }
+}
+
+pub struct SkipListConnection {
+    store: Arc<crossbeam_skiplist::SkipMap<Vec<u8>, Vec<u8>>>,
+}
+
+impl SkipListConnection {
+    const fn new(store: Arc<crossbeam_skiplist::SkipMap<Vec<u8>, Vec<u8>>>) -> Self {
+        Self { store }
+    }
+}
+
+impl KVStoreConnection for SkipListConnection {
+    type ReadGuard<'a> = SkipListReadGuard<'a>;
+
+    fn put(&mut self, key: &[u8], value: &[u8]) -> Result<(), KVError> {
+        self.store.insert(key.to_vec(), value.to_vec());
+        Ok(())
+    }
+
+    fn get_guard(&mut self) -> Result<Self::ReadGuard<'_>, KVError> {
+        Ok(SkipListReadGuard::new(&self.store))
+    }
+}
+
+#[derive(Debug)]
+pub struct SkipListReadGuard<'a> {
+    store: &'a crossbeam_skiplist::SkipMap<Vec<u8>, Vec<u8>>,
+    entry: Option<crossbeam_skiplist::map::Entry<'a, Vec<u8>, Vec<u8>>>,
+}
+
+impl<'a> SkipListReadGuard<'a> {
+    const fn new(store: &'a crossbeam_skiplist::SkipMap<Vec<u8>, Vec<u8>>) -> Self {
+        Self { store, entry: None }
+    }
+}
+
+impl<'a> KVReadGuard<'a> for SkipListReadGuard<'a> {
+    fn get(&mut self, key: &[u8]) -> Result<Option<&[u8]>, KVError> {
+        self.entry = self.store.get(key);
+        match &self.entry {
+            Some(entry) => Ok(Some(entry.value())),
+
+            None => Ok(None),
+        }
     }
 }
 
@@ -507,10 +578,18 @@ mod test {
     }
 
     #[test]
+    fn test_skipliststore() {
+        let store = SkipListStore::new();
+        test_kv_thread_safe(&store).unwrap();
+    }
+
+    #[test]
     fn test_redis_store() {
         let redis = RedisSpawner::new().unwrap();
-        let store = RedisStore::new(&redis.localhost_url()).expect("connect must succeed");
+        let store = RedisStore::new(&RedisSpawner::localhost_url()).expect("connect must succeed");
+
         test_kv_thread_safe(&store).expect("test failed");
+        drop(redis);
     }
 
     fn test_kv_single_threaded<T: KVStoreSingleThreaded>(store: &mut T) -> Result<(), KVError> {

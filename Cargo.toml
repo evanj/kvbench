@@ -23,6 +23,7 @@ debug = true
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
+crossbeam-skiplist = "0"
 go-parse-duration = "0"
 nix = { version = "0", features = ["signal"] }
 rand = { version = "0", features = ["small_rng"] }

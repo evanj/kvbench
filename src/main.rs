@@ -1,7 +1,7 @@
 use clap::Parser;
 use kvbench::{
     BTreeMapStore, HashMapStore, KVError, KVStore, KVStoreConnection, KVStoreSingleThreaded,
-    KVStoreSingleThreadedConnection, LockedKVStore, RedisStore,
+    KVStoreSingleThreadedConnection, LockedKVStore, RedisStore, SkipListStore,
 };
 use rand::prelude::Distribution;
 use rand::SeedableRng;
@@ -50,6 +50,7 @@ enum StoreKind {
     LockedHashMap,
     LockedBTreeMap,
     Redis,
+    SkipList,
 }
 
 /// Parses a duration using Go's formats, with the signature required by argh.
@@ -87,15 +88,6 @@ impl KeyGenerator {
     /// Generates a random key that is should exist.
     fn random_key_exists(&mut self) -> &[u8] {
         let key = self.key_range.sample(&mut self.rng) * 2;
-        self.key_buffer = key.to_be_bytes();
-        &self.key_buffer[..]
-    }
-
-    /// Generates a random key that does not exist.
-    // TODO: Use this?
-    #[allow(dead_code)]
-    fn random_key_not_found(&mut self) -> &[u8] {
-        let key = self.key_range.sample(&mut self.rng) * 2 + 1;
         self.key_buffer = key.to_be_bytes();
         &self.key_buffer[..]
     }
@@ -155,6 +147,10 @@ fn main() -> Result<(), KVError> {
         }
         StoreKind::Redis => {
             let store = RedisStore::new(&config.redis_url)?;
+            run_bench_multi_threaded(&store, &config)
+        }
+        StoreKind::SkipList => {
+            let store = SkipListStore::new();
             run_bench_multi_threaded(&store, &config)
         }
     }
